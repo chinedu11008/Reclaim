@@ -1,4 +1,4 @@
-// process-item: photo -> attributes (Claude vision) -> embedding -> candidates -> AI re-rank -> matches
+// process-item: photo -> attributes (Gemini vision) -> embedding -> candidates -> AI re-rank -> matches
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 
 declare const Supabase: any // built into the Supabase Edge runtime
@@ -10,24 +10,25 @@ const cors = {
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { ...cors, 'content-type': 'application/json' } })
 
-async function claude(content: unknown[], max_tokens = 700) {
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
+async function ai(content: unknown[] | string, _maxTokens?: number) {
+  // Gemini call. Accepts text blocks and base64 image blocks; returns parsed JSON.
+  const blocks = (typeof content === 'string' ? [{ type: 'text', text: content }] : content) as any[]
+  const parts = blocks.map((b) =>
+    b.type === 'image'
+      ? { inline_data: { mime_type: b.source.media_type, data: b.source.data } }
+      : { text: b.text },
+  )
+  const model = Deno.env.get('GEMINI_MODEL') ?? 'gemini-3.8-flash'
+  const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
     method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      'x-api-key': Deno.env.get('ANTHROPIC_API_KEY')!,
-      'anthropic-version': '2023-06-01',
-    },
-    body: JSON.stringify({
-      model: Deno.env.get('ANTHROPIC_MODEL') ?? 'claude-haiku-5-5',
-      max_tokens,
-      messages: [{ role: 'user', content }],
-    }),
+    headers: { 'content-type': 'application/json', 'x-goog-api-key': Deno.env.get('GEMINI_API_KEY')! },
+    body: JSON.stringify({ contents: [{ parts }], generationConfig: { responseMimeType: 'application/json' } }),
   })
-  if (!res.ok) throw new Error(`Claude API ${res.status}: ${await res.text()}`)
+  if (!res.ok) throw new Error(`Gemini API ${res.status}: ${await res.text()}`)
   const data = await res.json()
-  const text = data.content.map((b: { text?: string }) => b.text ?? '').join('')
-  return JSON.parse(text.replace(/```json|```/g, '').trim())
+  const out = (data.candidates?.[0]?.content?.parts ?? []).map((p: { text?: string }) => p.text ?? '').join('')
+  if (!out) throw new Error(`Gemini returned no text (${data.candidates?.[0]?.finishReason ?? data.promptFeedback?.blockReason ?? 'unknown'})`)
+  return JSON.parse(out.replace(/```json|```/g, '').trim())
 }
 
 const b64 = (u8: Uint8Array) => {
@@ -61,7 +62,7 @@ Deno.serve(async (req) => {
         content.unshift({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data } })
       }
     }
-    const attrs = await claude(content)
+    const attrs = await ai(content)
 
     // 2. Embed the description (built-in gte-small model, 384 dimensions)
     const text = [attrs.summary, attrs.category, attrs.colour, attrs.brand, attrs.marks, attrs.visible_text, item.note]
@@ -78,7 +79,7 @@ Deno.serve(async (req) => {
 
     // 4. AI re-rank: score each candidate and say why
     const brief = cands.map((c: any) => ({ id: c.id, note: c.note, location: c.location, attrs: c.attrs }))
-    const ranked = await claude([{
+    const ranked = await ai([{
       type: 'text',
       text: `A student posted a ${item.kind} item. Decide which candidates could be the same object.\nNew item: ${JSON.stringify({ note: item.note, location: item.location, attrs })}\nCandidates: ${JSON.stringify(brief)}\nReply with JSON only: an array of {"id":string,"score":number from 0 to 100,"reason":string} for candidates scoring 50 or more. "reason" is one short sentence naming the details that match. Return [] if none fit.`,
     }], 900) as { id: string; score: number; reason: string }[]

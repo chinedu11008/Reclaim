@@ -1,0 +1,10 @@
+[
+  { "file": "water-bottle.jpg", "note": "Steel water bottle with a dented base.", "location": "Library steps", "secret": "Initials C.O. are scratched inside the lid" },
+  { "file": "calculator.jpg", "note": "Scientific calculator with a cracked case.", "location": "Engineering block", "secret": "A name is written in pen inside the battery cover" },
+  { "file": "earbuds.jpg", "note": "White wireless earbuds in a charging case.", "location": "Cafeteria", "secret": "A small green sticker is on the back of the case" },
+  { "file": "keys.jpg", "note": "Three keys on a red lanyard.", "location": "Bus stop", "secret": "A tiny brass padlock key is on the ring" },
+  { "file": "umbrella.jpg", "note": "Black folding umbrella with a wooden handle.", "location": "Admin block", "secret": "The strap is tied with a yellow rubber band" },
+  { "file": "notebook.jpg", "note": "Green hardcover notebook with a coffee stain.", "location": "Library", "secret": "The first page has a drawing of a bridge" },
+  { "file": "glasses.jpg", "note": "Round black-framed glasses in a grey case.", "location": "Cafeteria", "secret": "The left arm is wrapped in tape" },
+  { "file": "charger.jpg", "note": "White laptop charger with a braided cable.", "location": "Lecture hall A", "secret": "A strip of blue tape marks the plug" }
+]

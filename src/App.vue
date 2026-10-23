@@ -3,26 +3,52 @@ import { ref, onMounted } from 'vue'
 import { supabase } from './supabase'
 
 const session = ref(null)
-const email = ref(''), password = ref(''), authMsg = ref('')
+const email = ref(''), password = ref(''), authMsg = ref(''), authNotice = ref('')
+const authBusy = ref(false), canResendConfirmation = ref(false)
 const kind = ref(null), note = ref(''), location = ref(''), secret = ref(''), file = ref(null)
 const items = ref([]), board = ref([]), matches = ref([])
 const busy = ref(false), err = ref(''), notice = ref('')
 let started = false
+const claims = ref([])
+const answers = ref({})
 
 const photo = (p) => (p ? supabase.storage.from('photos').getPublicUrl(p).data.publicUrl : null)
 const matchesFor = (it) => matches.value.filter((m) => (it.kind === 'lost' ? m.lost_id : m.found_id) === it.id)
 const other = (it, m) => (it.kind === 'lost' ? m.found : m.lost)
+const claimFor = (m) => claims.value.find((c) => c.match_id === m.id)
+
+// Call an Edge Function and surface its real error message.
+async function call(name, body) {
+  const r = await supabase.functions.invoke(name, { body })
+  if (r.error) {
+    const detail = await r.error.context?.json?.().catch(() => null)
+    throw new Error(detail?.error || r.error.message)
+  }
+  return r.data
+}
+
+async function claim(m, answer) {
+  err.value = ''
+  try {
+    await call('verify-claim', { match_id: m.id, answer })
+    await load()
+  } catch (e) {
+    err.value = e.message
+  }
+}
 
 async function load() {
   const uid = session.value.user.id
-  const [mine, found, mt] = await Promise.all([
+  const [mine, found, mt, cl] = await Promise.all([
     supabase.from('items').select('*').eq('user_id', uid).order('created_at', { ascending: false }),
     supabase.from('items').select('*').eq('kind', 'found').eq('status', 'open').order('created_at', { ascending: false }).limit(24),
     supabase.from('matches').select('*, lost:items!lost_id(*), found:items!found_id(*)').order('score', { ascending: false }),
+    supabase.from('claims').select('*'),
   ])
   items.value = mine.data ?? []
   board.value = found.data ?? []
   matches.value = mt.data ?? []
+  claims.value = cl.data ?? []
 }
 
 function start() {
@@ -36,6 +62,7 @@ function start() {
       load()
       setTimeout(() => (notice.value = ''), 5000)
     })
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'claims' }, load)
     .subscribe()
 }
 
@@ -51,9 +78,52 @@ onMounted(async () => {
 
 async function auth(mode) {
   authMsg.value = ''
-  const fn = mode === 'up' ? supabase.auth.signUp : supabase.auth.signInWithPassword
-  const { error } = await fn.call(supabase.auth, { email: email.value, password: password.value })
-  if (error) authMsg.value = error.message
+  authNotice.value = ''
+  canResendConfirmation.value = false
+  authBusy.value = true
+  try {
+    if (mode === 'up') {
+      const { data, error } = await supabase.auth.signUp({ email: email.value.trim(), password: password.value })
+      if (error) throw error
+      if (!data.session) {
+        authNotice.value = 'Check your inbox for a confirmation link before signing in.'
+        canResendConfirmation.value = true
+      }
+    } else {
+      const { error } = await supabase.auth.signInWithPassword({ email: email.value.trim(), password: password.value })
+      if (error) throw error
+    }
+  } catch (error) {
+    const message = error?.message || 'Could not complete authentication. Please try again.'
+    if (/email_not_confirmed|email not confirmed/i.test(message)) {
+      authMsg.value = 'This email is not confirmed yet. Check your inbox or resend the link below. For demo sign-in without email, disable Confirm email in Supabase Authentication settings.'
+      canResendConfirmation.value = true
+    } else if (/security purposes|rate.?limit|too many requests/i.test(message)) {
+      authMsg.value = 'Signup emails are temporarily rate-limited. Wait at least 60 seconds before trying again.'
+    } else {
+      authMsg.value = message
+    }
+  } finally {
+    authBusy.value = false
+  }
+}
+
+async function resendConfirmation() {
+  authMsg.value = ''
+  authNotice.value = ''
+  authBusy.value = true
+  try {
+    const { error } = await supabase.auth.resend({ type: 'signup', email: email.value.trim() })
+    if (error) throw error
+    authNotice.value = 'If this email needs confirmation, a new link has been sent. Check your inbox.'
+  } catch (error) {
+    const message = error?.message || 'Could not resend the confirmation email.'
+    authMsg.value = /security purposes|rate.?limit|too many requests/i.test(message)
+      ? 'A confirmation email was requested recently. Wait at least 60 seconds before trying again.'
+      : message
+  } finally {
+    authBusy.value = false
+  }
 }
 
 // Shrink photos before upload: faster, and inside the vision API's size limit.
@@ -73,9 +143,24 @@ function shrink(f, max = 1280) {
   })
 }
 
+async function retryItem(id) {
+  if (busy.value) return
+  busy.value = true
+  err.value = ''
+  try {
+    await call('process-item', { item_id: id })
+    await load()
+  } catch (e) {
+    err.value = e.message
+  } finally {
+    busy.value = false
+  }
+}
+
 async function submit() {
   busy.value = true
   err.value = ''
+  let itemSaved = false
   try {
     let photo_path = null
     if (file.value) {
@@ -87,15 +172,16 @@ async function submit() {
       .insert({ kind: kind.value, note: note.value, location: location.value || null, photo_path })
       .select().single()
     if (error) throw error
+    itemSaved = true
     if (kind.value === 'found' && secret.value) await supabase.from('item_secrets').insert({ item_id: data.id, detail: secret.value })
-    const r = await supabase.functions.invoke('process-item', { body: { item_id: data.id } })
-    if (r.error) throw r.error
     note.value = location.value = secret.value = ''
     file.value = null
     kind.value = null
+    await call('process-item', { item_id: data.id })
     await load()
   } catch (e) {
     err.value = e.message
+    if (itemSaved) await load()
   } finally {
     busy.value = false
   }
@@ -109,9 +195,11 @@ async function submit() {
     <label>Email <input v-model="email" type="email" autocomplete="email" /></label>
     <label>Password <input v-model="password" type="password" autocomplete="current-password" /></label>
     <div class="row">
-      <button class="primary" @click="auth('in')">Sign in</button>
-      <button @click="auth('up')">Create account</button>
+      <button class="primary" :disabled="authBusy" @click="auth('in')">{{ authBusy ? 'Please wait…' : 'Sign in' }}</button>
+      <button :disabled="authBusy" @click="auth('up')">Create account</button>
     </div>
+    <button v-if="canResendConfirmation" :disabled="authBusy" @click="resendConfirmation">Resend confirmation email</button>
+    <p v-if="authNotice" class="notice" role="status">{{ authNotice }}</p>
     <p v-if="authMsg" class="err" role="alert">{{ authMsg }}</p>
   </main>
 
@@ -121,6 +209,7 @@ async function submit() {
       <button @click="supabase.auth.signOut()">Sign out</button>
     </header>
     <p v-if="notice" class="notice" role="status">{{ notice }}</p>
+    <p v-if="err && !kind" class="err" role="alert">{{ err }}</p>
 
     <section class="actions">
       <button :class="{ on: kind === 'lost' }" @click="kind = 'lost'">I lost something</button>
@@ -148,6 +237,10 @@ async function submit() {
         <div class="grow">
           <h3>{{ it.attrs?.summary || it.note }}</h3>
           <p class="meta">{{ it.kind === 'lost' ? 'Lost' : 'Found' }} at {{ it.location || 'an unknown place' }}</p>
+          <template v-if="!it.attrs">
+            <p class="err">AI matching did not finish for this item.</p>
+            <button :disabled="busy" @click="retryItem(it.id)">{{ busy ? 'Matching…' : 'Retry AI matching' }}</button>
+          </template>
           <p v-if="!matchesFor(it).length" class="empty">No matches yet. We check every new post.</p>
           <div v-for="m in matchesFor(it)" :key="m.id" class="ticket">
             <div class="stub">{{ m.score }}%</div>
@@ -156,6 +249,20 @@ async function submit() {
               <p>{{ m.reason }}</p>
               <p v-if="other(it, m)" class="meta">Found at {{ other(it, m).location || 'an unknown place' }}</p>
               <p v-else class="meta">The owner has been notified.</p>
+              <template v-if="it.kind === 'lost' && other(it, m)">
+                <button v-if="!claimFor(m)" @click="claim(m)">This is mine</button>
+                <div v-else class="verify">
+                  <p><strong>{{ claimFor(m).question }}</strong></p>
+                  <template v-if="!claimFor(m).verdict">
+                    <input v-model="answers[m.id]" aria-label="Your answer" />
+                    <button class="primary" @click="claim(m, answers[m.id])">Check my answer</button>
+                  </template>
+                  <p v-else :class="claimFor(m).verdict === 'verified' ? 'ok' : 'err'">
+                    {{ claimFor(m).verdict === 'verified' ? 'Verified. Collect it at ' + (other(it, m).location || 'the place listed') + '.' : 'Not verified. ' + claimFor(m).note }}
+                  </p>
+                </div>
+              </template>
+              <p v-else-if="it.kind === 'found' && claimFor(m)?.verdict === 'verified'" class="ok">Owner verified. Hand the item over.</p>
             </div>
           </div>
         </div>
@@ -211,4 +318,6 @@ figcaption { font-size: 0.9rem; margin-top: 0.3rem; }
 .empty { color: var(--soft); }
 .err { color: #b3261e; font-weight: 600; }
 .notice { margin: 0 0 1rem; padding: 0.6rem 1rem; background: var(--tag); border-radius: 6px; font-weight: 700; }
+.ok { color: #1b6e3c; font-weight: 700; }
+.verify { margin-top: 0.5rem; }
 </style>
