@@ -10,7 +10,7 @@ Post a lost or found item with a photo. A vision model describes it, vector sear
 Built with help from Claude as an AI coding assistant.
 
 ## Run it
-Needs Node 18+, a Supabase project and a Gemini API key (free from aistudio.google.com).
+Needs Node 22.12+, a Supabase project and a Gemini API key (free from aistudio.google.com).
 
 1. In the Supabase SQL Editor, run `supabase/schema.sql`. Under Auth > Providers > Email, turn off "Confirm email" for demos.
 2. Deploy the function:
