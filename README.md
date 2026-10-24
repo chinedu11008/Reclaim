@@ -13,6 +13,7 @@ Built with help from Claude as an AI coding assistant.
 Needs Node 22.12+, a Supabase project and a Gemini API key (free from aistudio.google.com).
 
 1. In the Supabase SQL Editor, run `supabase/schema.sql`. Under Auth > Providers > Email, turn off "Confirm email" for demos.
+   For an existing project, also run `supabase/003_item_deletion.sql` to enable deleting your own items and photos.
 2. Deploy the function:
    ```sh
    npx supabase init            # first time only

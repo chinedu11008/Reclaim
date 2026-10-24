@@ -8,6 +8,7 @@ const authBusy = ref(false), canResendConfirmation = ref(false)
 const kind = ref(null), note = ref(''), location = ref(''), secret = ref(''), file = ref(null)
 const items = ref([]), board = ref([]), matches = ref([])
 const busy = ref(false), err = ref(''), notice = ref('')
+const deletingId = ref(null)
 let started = false
 const claims = ref([])
 const answers = ref({})
@@ -157,6 +158,33 @@ async function retryItem(id) {
   }
 }
 
+async function removeItem(item) {
+  const label = item.attrs?.summary || item.note
+  if (!window.confirm(`Delete "${label}"? This also removes its photo and related matches. This cannot be undone.`)) return
+  deletingId.value = item.id
+  err.value = ''
+  try {
+    if (item.photo_path) {
+      const { error: photoError } = await supabase.storage.from('photos').remove([item.photo_path])
+      if (photoError) throw photoError
+    }
+    const { data: deleted, error } = await supabase.from('items').delete()
+      .eq('id', item.id)
+      .eq('user_id', session.value.user.id)
+      .select('id')
+      .maybeSingle()
+    if (error) throw error
+    if (!deleted) throw new Error('Item deletion was blocked. Run supabase/003_item_deletion.sql in your Supabase SQL Editor, then try again.')
+    items.value = items.value.filter((it) => it.id !== item.id)
+    matches.value = matches.value.filter((match) => match.lost_id !== item.id && match.found_id !== item.id)
+    await load()
+  } catch (e) {
+    err.value = e.message
+  } finally {
+    deletingId.value = null
+  }
+}
+
 async function submit() {
   busy.value = true
   err.value = ''
@@ -235,7 +263,10 @@ async function submit() {
       <article v-for="it in items" :key="it.id" class="item">
         <img v-if="photo(it.photo_path)" :src="photo(it.photo_path)" :alt="it.attrs?.summary || it.note" />
         <div class="grow">
-          <h3>{{ it.attrs?.summary || it.note }}</h3>
+          <div class="item-heading">
+            <h3>{{ it.attrs?.summary || it.note }}</h3>
+            <button class="delete" :disabled="!!deletingId" @click="removeItem(it)">{{ deletingId === it.id ? 'Deleting…' : 'Delete' }}</button>
+          </div>
           <p class="meta">{{ it.kind === 'lost' ? 'Lost' : 'Found' }} at {{ it.location || 'an unknown place' }}</p>
           <template v-if="!it.attrs">
             <p class="err">AI matching did not finish for this item.</p>
@@ -305,6 +336,8 @@ input, textarea { display: block; width: 100%; margin-top: 0.25rem; padding: 0.5
 .item { display: flex; gap: 1rem; padding: 1rem 0; border-top: 1px solid #14213d33; }
 .item > img { width: 96px; height: 96px; object-fit: cover; border-radius: 6px; }
 .grow { flex: 1; min-width: 0; }
+.item-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 0.75rem; }
+.delete { flex: 0 0 auto; padding: 0.25rem 0.55rem; border-color: #b3261e; color: #b3261e; font-size: 0.9rem; }
 .ticket { display: flex; margin-top: 0.75rem; background: #fff; border: 2px solid var(--ink); border-radius: 6px; overflow: hidden; }
 .stub { display: flex; align-items: center; padding: 0 1rem; background: var(--tag); border-right: 2px dashed var(--ink); font-size: 1.5rem; font-weight: 800; }
 .ticket .body { padding: 0.6rem 0.8rem; }

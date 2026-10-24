@@ -40,6 +40,8 @@ create policy "insert own" on public.items for insert to authenticated
   with check (user_id = auth.uid());
 create policy "update own" on public.items for update to authenticated
   using (user_id = auth.uid());
+create policy "delete own items" on public.items for delete to authenticated
+  using (user_id = auth.uid());
 
 create policy "own secret" on public.item_secrets for all to authenticated
   using (exists (select 1 from public.items i where i.id = item_id and i.user_id = auth.uid()))
@@ -63,6 +65,8 @@ $$;
 insert into storage.buckets (id, name, public) values ('photos', 'photos', true) on conflict (id) do nothing;
 create policy "upload to own folder" on storage.objects for insert to authenticated
   with check (bucket_id = 'photos' and (storage.foldername(name))[1] = auth.uid()::text);
+create policy "delete own photos" on storage.objects for delete to authenticated
+  using (bucket_id = 'photos' and (storage.foldername(name))[1] = auth.uid()::text);
 
 -- Live alerts when a match appears.
 alter publication supabase_realtime add table public.matches;
